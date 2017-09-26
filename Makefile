@@ -3,7 +3,7 @@ GOOS=$(word 1,$(subst /, ,$(lastword $(GOVERSION))))
 GOARCH=$(word 2,$(subst /, ,$(lastword $(GOVERSION))))
 RELEASE_DIR=bin
 DEVTOOL_DIR=devtools
-PACKAGE=github.com/moznion/resque_exporter
+PACKAGE=github.com/catawiki/resque_exporter
 REVISION=$(shell git rev-parse --verify HEAD)
 HAVE_GLIDE:=$(shell which glide > /dev/null 2>&1)
 
@@ -55,4 +55,3 @@ installdeps: glide
 
 clean:
 	rm -rf $(RELEASE_DIR)/resque_exporter_*
-
