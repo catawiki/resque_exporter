@@ -18,6 +18,7 @@ type exporter struct {
 	scrapeFailures prometheus.Counter
 	processed      *prometheus.GaugeVec
 	failedQueue    *prometheus.GaugeVec
+	failedQueueStatus *prometheus.GaugeVec
 	failedTotal    *prometheus.GaugeVec
 	queueStatus    *prometheus.GaugeVec
 	totalWorkers   *prometheus.GaugeVec
@@ -34,6 +35,14 @@ func newExporter(config *Config) (*exporter, error) {
 				Namespace: namespace,
 				Name:      "jobs_in_queue",
 				Help:      "Number of remained jobs in queue",
+			},
+			[]string{"host", "db", "namespace", "queue_name"},
+		),
+		failedQueueStatus: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: namespace,
+				Name:      "jobs_in_failed_queue",
+				Help:      "Number of failed jobs in queue",
 			},
 			[]string{"host", "db", "namespace", "queue_name"},
 		),
@@ -100,6 +109,7 @@ func newExporter(config *Config) (*exporter, error) {
 func (e *exporter) Describe(ch chan<- *prometheus.Desc) {
 	e.scrapeFailures.Describe(ch)
 	e.queueStatus.Describe(ch)
+	e.failedQueueStatus.Describe(ch)
 	e.processed.Describe(ch)
 	e.failedQueue.Describe(ch)
 	e.failedTotal.Describe(ch)
@@ -170,6 +180,21 @@ func (e *exporter) collect(ch chan<- prometheus.Metric) {
 				e.queueStatus.WithLabelValues(append(labels, q)...).Set(float64(n))
 			}
 
+			failedQueues, err := redis.SMembers(fmt.Sprintf("%s:failed_queues", resqueNamespace)).Result()
+			if err != nil {
+				e.incrementFailures(ch)
+				return
+			}
+
+			for _, q := range failedQueues {
+				n, err := redis.LLen(fmt.Sprintf("%s:%s", resqueNamespace, q)).Result()
+				if err != nil {
+					e.incrementFailures(ch)
+					return
+				}
+				e.failedQueueStatus.WithLabelValues(append(labels, q[0:len(q)-7])...).Set(float64(n))
+			}
+
 			processed, err := redis.Get(fmt.Sprintf("%s:stat:processed", resqueNamespace)).Result()
 			if err != nil {
 				e.incrementFailures(ch)
@@ -219,6 +244,7 @@ func (e *exporter) incrementFailures(ch chan<- prometheus.Metric) {
 
 func (e *exporter) notifyToCollect(ch chan<- prometheus.Metric) {
 	e.queueStatus.Collect(ch)
+	e.failedQueueStatus.Collect(ch)
 	e.processed.Collect(ch)
 	e.failedQueue.Collect(ch)
 	e.failedTotal.Collect(ch)
