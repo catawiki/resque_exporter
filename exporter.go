@@ -192,7 +192,7 @@ func (e *exporter) collect(ch chan<- prometheus.Metric) {
 					e.incrementFailures(ch)
 					return
 				}
-				e.failedQueueStatus.WithLabelValues(append(labels, q[0:len(q)-7])...).Set(float64(n))
+				e.failedQueueStatus.WithLabelValues(append(labels, q)...).Set(float64(n))
 			}
 
 			processed, err := redis.Get(fmt.Sprintf("%s:stat:processed", resqueNamespace)).Result()
