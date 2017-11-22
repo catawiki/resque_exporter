@@ -128,7 +128,9 @@ func (e *exporter) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	e.collect(ch)
+	if err := e.collect(ch); err != nil {
+		e.incrementFailures(ch)
+	}
 
 	e.timer = time.AfterFunc(time.Duration(e.config.GuardIntervalMillis)*time.Millisecond, func() {
 		// reset timer
@@ -138,8 +140,7 @@ func (e *exporter) Collect(ch chan<- prometheus.Metric) {
 	})
 }
 
-func (e *exporter) collect(ch chan<- prometheus.Metric) {
-	var wg sync.WaitGroup
+func (e *exporter) collect(ch chan<- prometheus.Metric) error {
 	for i := range e.config.ResqueConfigs {
 		resqueConf := e.config.ResqueConfigs[i]
 		labels := []string{resqueConf.Host, strconv.FormatInt(resqueConf.DB, 10), resqueConf.Namespace}
@@ -152,89 +153,80 @@ func (e *exporter) collect(ch chan<- prometheus.Metric) {
 			DB:       resqueConf.DB,
 		}
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			redis := redis.NewClient(redisOpt)
-			defer redis.Close()
+		client := redis.NewClient(redisOpt)
+		defer client.Close()
 
-			failed, err := redis.LLen(fmt.Sprintf("%s:failed", resqueNamespace)).Result()
-			if err != nil {
-				e.incrementFailures(ch)
-				return
-			}
-			e.failedQueue.WithLabelValues(labels...).Set(float64(failed))
+		failed, err := client.LLen(fmt.Sprintf("%s:failed", resqueNamespace)).Result()
+		if err != nil && err != redis.Nil {
+			return err
+		}
+		e.failedQueue.WithLabelValues(labels...).Set(float64(failed))
 
-			queues, err := redis.SMembers(fmt.Sprintf("%s:queues", resqueNamespace)).Result()
-			if err != nil {
-				e.incrementFailures(ch)
-				return
-			}
+		queues, err := client.SMembers(fmt.Sprintf("%s:queues", resqueNamespace)).Result()
+		if err != nil && err != redis.Nil {
+			return err
+		}
 
-			for _, q := range queues {
-				n, err := redis.LLen(fmt.Sprintf("%s:queue:%s", resqueNamespace, q)).Result()
-				if err != nil {
-					e.incrementFailures(ch)
-					return
-				}
-				e.queueStatus.WithLabelValues(append(labels, q)...).Set(float64(n))
+		for _, q := range queues {
+			n, err := client.LLen(fmt.Sprintf("%s:queue:%s", resqueNamespace, q)).Result()
+			if err != nil && err != redis.Nil {
+				return err
 			}
+			e.queueStatus.WithLabelValues(append(labels, q)...).Set(float64(n))
+		}
 
-			failedQueues, err := redis.SMembers(fmt.Sprintf("%s:failed_queues", resqueNamespace)).Result()
-			if err != nil {
-				e.incrementFailures(ch)
-				return
-			}
+		failedQueues, err := client.SMembers(fmt.Sprintf("%s:failed_queues", resqueNamespace)).Result()
+		if err != nil && err != redis.Nil {
+			return err
+		}
 
-			for _, q := range failedQueues {
-				n, err := redis.LLen(fmt.Sprintf("%s:%s", resqueNamespace, q)).Result()
-				if err != nil {
-					e.incrementFailures(ch)
-					return
-				}
-				e.failedQueueStatus.WithLabelValues(append(labels, q[0:len(q)-7])...).Set(float64(n))
+		for _, q := range failedQueues {
+			n, err := client.LLen(fmt.Sprintf("%s:%s", resqueNamespace, q)).Result()
+			if err != nil && err != redis.Nil {
+				return err
 			}
+			e.failedQueueStatus.WithLabelValues(append(labels, q)...).Set(float64(n))
+		}
 
-			processed, err := redis.Get(fmt.Sprintf("%s:stat:processed", resqueNamespace)).Result()
-			if err != nil {
-				e.incrementFailures(ch)
-				return
-			}
-			processedCnt, _ := strconv.ParseFloat(processed, 64)
-			e.processed.WithLabelValues(labels...).Set(processedCnt)
+		processed, err := client.Get(fmt.Sprintf("%s:stat:processed", resqueNamespace)).Result()
+		if err != nil && err != redis.Nil {
+			return err
+		}
+		processedCnt, _ := strconv.ParseFloat(processed, 64)
+		e.processed.WithLabelValues(labels...).Set(processedCnt)
 
-			failedtotal, err := redis.Get(fmt.Sprintf("%s:stat:failed", resqueNamespace)).Result()
-			if err != nil {
-				e.incrementFailures(ch)
-				return
-			}
-			failedCnt, _ := strconv.ParseFloat(failedtotal, 64)
-			e.failedTotal.WithLabelValues(labels...).Set(failedCnt)
+		failedtotal, err := client.Get(fmt.Sprintf("%s:stat:failed", resqueNamespace)).Result()
+		if err != nil && err != redis.Nil {
+			return err
+		}
+		failedCnt, _ := strconv.ParseFloat(failedtotal, 64)
+		e.failedTotal.WithLabelValues(labels...).Set(failedCnt)
 
-			workers, err := redis.SMembers(fmt.Sprintf("%s:workers", resqueNamespace)).Result()
-			if err != nil {
-				e.incrementFailures(ch)
-				return
-			}
-			e.totalWorkers.WithLabelValues(labels...).Set(float64(len(workers)))
+		workers, err := client.SMembers(fmt.Sprintf("%s:workers", resqueNamespace)).Result()
+		if err != nil && err != redis.Nil {
+			return err
+		}
+		e.totalWorkers.WithLabelValues(labels...).Set(float64(len(workers)))
 
-			activeWorkers := 0
-			idleWorkers := 0
-			for _, w := range workers {
-				_, err := redis.Get(fmt.Sprintf("%s:worker:%s", resqueNamespace, w)).Result()
-				if err == nil {
-					activeWorkers++
-				} else {
-					idleWorkers++
-				}
+		activeWorkers := 0
+		idleWorkers := 0
+		for _, w := range workers {
+			_, err := client.Get(fmt.Sprintf("%s:worker:%s", resqueNamespace, w)).Result()
+			if err != nil && err != redis.Nil {
+				return err
+			} else if err != redis.Nil {
+				activeWorkers++
+			} else {
+				idleWorkers++
 			}
-			e.activeWorkers.WithLabelValues(labels...).Set(float64(activeWorkers))
-			e.idleWorkers.WithLabelValues(labels...).Set(float64(idleWorkers))
-		}()
+		}
+		e.activeWorkers.WithLabelValues(labels...).Set(float64(activeWorkers))
+		e.idleWorkers.WithLabelValues(labels...).Set(float64(idleWorkers))
 	}
 
-	wg.Wait()
 	e.notifyToCollect(ch)
+
+	return nil
 }
 
 func (e *exporter) incrementFailures(ch chan<- prometheus.Metric) {
