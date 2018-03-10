@@ -2,6 +2,7 @@ package resqueExporter
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -14,6 +15,8 @@ const namespace = "resque"
 
 type exporter struct {
 	config         *Config
+	queues         map[string][]string
+	failedQueues   map[string][]string
 	mut            sync.Mutex
 	scrapeFailures prometheus.Counter
 	processed      *prometheus.GaugeVec
@@ -30,6 +33,8 @@ type exporter struct {
 func newExporter(config *Config) (*exporter, error) {
 	e := &exporter{
 		config: config,
+		queues: make(map[string][]string),
+		failedQueues: make(map[string][]string),
 		queueStatus: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Namespace: namespace,
@@ -167,26 +172,67 @@ func (e *exporter) collect(ch chan<- prometheus.Metric) error {
 			return err
 		}
 
+		var (
+			labelsString = fmt.Sprintf("%s:%s:%s", labels[0], labels[1], labels[2])
+			removedQueues = make([]string, 10)
+			exporterQueuesIdx = 0
+			oldQueues = e.queues[labelsString]
+		)
+		sort.Strings(queues)
+
 		for _, q := range queues {
+			for exporterQueuesIdx < len(oldQueues) {
+				oldQueue := oldQueues[exporterQueuesIdx]
+				if oldQueue > q { break }
+				if oldQueue != q { removedQueues = append(removedQueues, oldQueue) }
+				exporterQueuesIdx += 1
+			}
 			n, err := client.LLen(fmt.Sprintf("%s:queue:%s", resqueNamespace, q)).Result()
 			if err != nil && err != redis.Nil {
 				return err
 			}
 			e.queueStatus.WithLabelValues(append(labels, q)...).Set(float64(n))
 		}
+		removedQueues = append(removedQueues, oldQueues[exporterQueuesIdx:]...)
+
+		for _, q := range removedQueues {
+			e.queueStatus.DeleteLabelValues(append(labels, q)...)
+		}
+
+		e.queues[labelsString] = queues
 
 		failedQueues, err := client.SMembers(fmt.Sprintf("%s:failed_queues", resqueNamespace)).Result()
 		if err != nil && err != redis.Nil {
 			return err
 		}
 
+		var (
+			removedFailedQueues = make([]string, 10)
+			exporterFailedQueuesIdx = 0
+			oldFailedQueues = e.failedQueues[labelsString]
+		)
+		sort.Strings(failedQueues)
+
 		for _, q := range failedQueues {
+			for exporterFailedQueuesIdx < len(oldFailedQueues) {
+				oldQueue := oldFailedQueues[exporterFailedQueuesIdx]
+				if oldQueue > q { break }
+				if oldQueue != q { removedFailedQueues = append(removedFailedQueues, oldQueue) }
+				exporterFailedQueuesIdx += 1
+			}
 			n, err := client.LLen(fmt.Sprintf("%s:%s", resqueNamespace, q)).Result()
 			if err != nil && err != redis.Nil {
 				return err
 			}
 			e.failedQueueStatus.WithLabelValues(append(labels, q)...).Set(float64(n))
 		}
+		removedFailedQueues = append(removedFailedQueues, oldFailedQueues[exporterFailedQueuesIdx:]...)
+
+		for _, q := range removedFailedQueues {
+			e.failedQueueStatus.DeleteLabelValues(append(labels, q)...)
+		}
+
+		e.failedQueues[labelsString] = failedQueues
 
 		processed, err := client.Get(fmt.Sprintf("%s:stat:processed", resqueNamespace)).Result()
 		if err != nil && err != redis.Nil {
